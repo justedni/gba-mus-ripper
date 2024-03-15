@@ -2,11 +2,11 @@
 Changes by Vincent Dortel, 2024
 =======================================
 LFO/Modwheel fixes:
-- "Stop LFO on NoteOff" was messing with "global LFO" instructions that apply to time ranges. It will now only be sent when the "Auto LFO Delay" option is enabled. (bug was occuring in Golden Sun - "Having Fun")
-- Fixed hack that doesn't send out LFO instructions that happen on frame 0. That hack was only meant to do that when the "LFO Delay" mode is active:
-when that's the case, tracks usually have a "LFO depth" instruction on frame 0 but this is just a "setup" instruction, it does not necessarily mean modulation actually starts at frame 0. The value will be used by future LFOs instructions happening on note tails.
-But if the "LFO Delay" mode is disabled, then frame 0 LFO instructions should be sent! (bug was occuring in Golden Sun - "Desert Heat")
-- Fixed weird discrepancy with the mod wheel values calculation for midi files (one mode was doing x8 and the other x10)
+~~ "Stop LFO on NoteOff" was messing with "global LFO" instructions that apply to time ranges. It will now only be sent when the "Auto LFO Delay" option is enabled. (bug was occuring in Golden Sun - "Having Fun")
+
+~~ Fixed hack that doesn't send out LFO instructions that happen on frame 0. That hack was only meant to do that when the "LFO Delay" mode is active: when that's the case, tracks usually have a "LFO depth" instruction on frame 0 but this is just a "setup" instruction, it does not necessarily mean modulation actually starts at frame 0. The value will be used by future LFOs instructions happening on note tails. But if the "LFO Delay" mode is disabled, then frame 0 LFO instructions should be sent! (bug was occuring in Golden Sun - "Desert Heat")
+
+~~ Fixed weird discrepancy with the mod wheel values calculation for midi files (one mode was doing x8 and the other x10)
 
 See my restored version of Desert Heat: https://www.youtube.com/watch?v=v4LqjFgC95U
 and Having Fun: https://www.youtube.com/watch?v=YNXf9F7kiqc
