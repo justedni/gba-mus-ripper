@@ -28,12 +28,63 @@ static bool end_flag = false;
 static bool loop_flag = false;
 static uint32_t loop_adr;
 
-static int lfo_delay_ctr[16];
-static int lfo_delay[16];
-static int lfo_depth[16];
-static int lfo_type[16];
-static bool lfo_flag[16];
-static int lfo_startup[16];
+struct LfoState
+{
+	enum EParam : uint8_t { Type = 0, Speed, Delay, Depth };
+
+	uint8_t speed = 0;
+	uint8_t delay = 0;
+	uint8_t depth = 0xFF;
+
+	enum EType : uint8_t { Pitch = 0, Vol, Pan, None };
+	uint8_t type = EType::None;
+	uint8_t previousType = EType::None;
+
+	int delay_ctr = 0;
+	bool flag = false;
+
+	uint8_t pendingChanges = 0;
+
+	void setSpeed(uint8_t val)
+	{
+		if (val != speed)
+		{
+			speed = val;
+			pendingChanges |= (1 << EParam::Speed);
+		}
+	}
+
+	void setDelay(uint8_t val)
+	{
+		if (val != delay)
+		{
+			delay = val;
+			pendingChanges |= (1 << EParam::Delay);
+		}
+	}
+
+	void setDepth(uint8_t val)
+	{
+		if (val != depth)
+		{
+			depth = val;
+			pendingChanges |= (1 << EParam::Depth);
+		}
+		flag = true;
+	}
+
+	void setType(uint8_t val)
+	{
+		if (val >= Pitch && val < None && val != type)
+		{
+			previousType = type;
+			type = val;
+			pendingChanges |= (1 << EParam::Type);
+		}
+	}
+};
+
+static LfoState lfo_state[16];
 
 static unsigned int simultaneous_notes_ctr = 0;
 static unsigned int simultaneous_notes_max = 0;
@@ -79,22 +130,81 @@ static void add_simultaneous_note()
 		simultaneous_notes_max = simultaneous_notes_ctr;
 }
 
-// LFO logic on tick
-static void process_lfo(int track)
+static int8_t lfo_depth_to_midi(int depth)
 {
-	if (sv && lfo_delay_ctr[track] != 0)
+	return depth > 12 ? 127 : depth * 10;
+}
+
+static void add_lfo_event(int track, uint8_t type, int8_t midi_depth)
+{
+	switch (type)
+	{
+		case LfoState::Pitch:
+			midi.add_controller(track, 1, midi_depth);
+			break;
+		case LfoState::Vol:
+			midi.add_chanaft(track, midi_depth);
+			break;
+		case LfoState::Pan: // no standard MIDI equivalent for pan LFO: type needs to be handled by custom VST
+			midi.add_NRPN(track, 138, (char)midi_depth); 
+			break;
+		default:
+			break;
+	}
+}
+
+static void process_lfo_state(int track)
+{
+	if (!sv)
+		return;
+
+	LfoState& state = lfo_state[track];
+	if (state.pendingChanges > 0)
+	{
+		if (state.pendingChanges & (1 << LfoState::Type))
+		{
+			if (state.flag && state.previousType != LfoState::None && state.previousType != state.type)
+			{
+				// Already active, stop previous one first
+				add_lfo_event(track, state.previousType, 0);
+			}
+
+			midi.add_NRPN(track, 139, (char)state.type);
+		}
+		
+		if (state.pendingChanges & (1 << LfoState::Speed))
+		{
+			midi.add_NRPN(track, 136, (char)state.speed);
+		}
+		
+		if (state.pendingChanges & (1 << LfoState::Delay))
+		{
+			// No need to send the delay, it is handled internally here
+			//midi.add_NRPN(track, 137, state.delay);
+		}
+		
+		if (state.pendingChanges & (1 << LfoState::Depth))
+		{
+			int8_t midi_depth = lfo_depth_to_midi(state.depth);
+			add_lfo_event(track, state.type, midi_depth);
+		}
+
+		state.pendingChanges = 0;
+	}
+}
+
+// LFO logic on tick
+static void process_lfo_delay(int track)
+{
+	LfoState& state = lfo_state[track];
+	if (sv && state.delay_ctr != 0)
 	{
 		// Decrease counter if it's value was nonzero
-		if (--lfo_delay_ctr[track] == 0)
+		if ((--state.delay_ctr == 0) && state.depth != 0xFF)
 		{
-			// If 1->0 transition we need to add a signal to start the LFO
-			if (lfo_type[track] == 0)
-				// Send a controller 1 if pitch LFO
-				midi.add_controller(track, 1, (lfo_depth[track] < 16) ? lfo_depth[track] * 10 : 127);
-			else
-				// Send a channel aftertouch otherwise
-				midi.add_chanaft(track, (lfo_depth[track] < 16) ? lfo_depth[track] * 8 : 127);
-			lfo_flag[track] = true;
+			int8_t midi_depth = lfo_depth_to_midi(state.depth);
+			add_lfo_event(track, state.type, midi_depth);
+			state.flag = true;
 		}
 	}
 }
@@ -102,23 +212,21 @@ static void process_lfo(int track)
 static void start_lfo(int track)
 {
 	// Reset down delay counter to its initial value
-	if (sv && lfo_delay[track] != 0)
-		lfo_delay_ctr[track] = lfo_delay[track];
+	if (sv && lfo_state[track].delay != 0)
+		lfo_state[track].delay_ctr = lfo_state[track].delay;
 }
 
 static void stop_lfo(int track)
 {
 	// Cancel a LFO if it was playing,
-	if (sv && lfo_flag[track] && lfo_delay[track] != 0)
+	LfoState& state = lfo_state[track];
+	if (sv && state.flag && state.delay != 0)
 	{
-		if (lfo_type[track] == 0)
-			midi.add_controller(track, 1, 0);
-		else
-			midi.add_chanaft(track, 0);
-		lfo_flag[track] = false;
+		add_lfo_event(track, state.type, 0);
+		state.flag = false;
 	}
 	else
-		lfo_delay_ctr[track] = 0;			// cancel delay counter if it wasn't playing
+		state.delay_ctr = 0;			// cancel delay counter if it wasn't playing
 }
 
 // Note class
@@ -197,11 +305,13 @@ static bool tick(int track_amnt)
 
 			process_event(track);
 		}
+
+		process_lfo_state(track);
 	}
 
 	for (int track = 0; track < track_amnt; track++)
 	{
-		process_lfo(track);
+		process_lfo_delay(track);
 	}
 
 	// Compute if all still active channels are completely decoded
@@ -230,28 +340,6 @@ static uint32_t get_GBA_pointer()
 
 static void process_event(int track)
 {
-	auto updateStartupLFO = [&]()
-	{
-		if (lfo_startup[track] > 0)
-		{
-			if (lfo_delay[track] == 0)
-			{
-				if (lfo_type[track] == 0)
-					midi.add_controller(track, 1, lfo_startup[track]);
-				else
-					midi.add_chanaft(track, lfo_startup[track]);
-			}
-
-			lfo_startup[track] = 0;
-		}
-	};
-
-	if (lfo_delay[track] > 0)
-	{
-		updateStartupLFO();
-	}
-
-
 	// Length table for notes and rests
 	const int lenTbl[] =
 	{
@@ -345,7 +433,6 @@ static void process_event(int track)
 	// Note on with specified length command
 	if (command >= 0xd0)
 	{
-		updateStartupLFO();
 		int key, vel, len_ofs = 0;
 		// Is arg1 a key value ?
 		if (arg1 < 0x80)
@@ -385,6 +472,9 @@ static void process_event(int track)
 
 		// Linearise velocity if needed
 		if (lv) vel = sqrt(127.0 * vel);
+
+		// Flush pending LFO instructions
+		process_lfo_state(track);
 
 		notes_playing.push_front( Note(midi, track, lenTbl[command - 0xd0 + 1] + len_ofs, key + key_shift[track], vel) );
 		return;
@@ -441,7 +531,7 @@ static void process_event(int track)
 		// LFO Speed
 		case 0xc2:
 			if (sv)
-				midi.add_NRPN(track, 136, (char)arg1);
+				lfo_state[track].setSpeed(arg1);
 			else
 				midi.add_controller(track, 21, arg1);
 			return;
@@ -449,7 +539,7 @@ static void process_event(int track)
 		// LFO delay
 		case 0xc3:
 			if (sv)
-				lfo_delay[track] = arg1;
+				lfo_state[track].setDelay(arg1);
 			else
 				midi.add_controller(track, 26, arg1);
 			return;
@@ -457,24 +547,7 @@ static void process_event(int track)
 		// LFO depth
 		case 0xc4:
 			if (sv)
-			{
-				if (counter[track] <= 0)
-				{
-					lfo_startup[track] = (arg1 > 12 ? 127 : 10 * arg1);
-				}
-				else
-				{
-					if (lfo_type[track]==0)
-						midi.add_controller(track, 1, arg1>12 ? 127 : 10 * arg1);
-					else
-						midi.add_chanaft(track, arg1>12 ? 127 : 10 * arg1);
-
-					lfo_flag[track] = true;
-				}
-				lfo_depth[track] = arg1;
-				// I had a stupid bug with LFO inserting controllers I didn't want at the start of files
-				// So I made a terrible quick fix for it, in the mean time I can find something better to prevent it.
-			}
+				lfo_state[track].setDepth(arg1);
 			else
 				midi.add_controller(track, 1, arg1);
 			return;
@@ -482,7 +555,7 @@ static void process_event(int track)
 		// LFO type
 		case 0xc5:
 			if (sv)
-				lfo_type[track] = arg1;
+				lfo_state[track].setType(arg1);
 			else
 				midi.add_controller(track, 22, arg1);
 			return;
@@ -550,6 +623,9 @@ static void process_event(int track)
 			}
 			// Linearise velocity if needed
 			if (lv) vel = (int)sqrt(127.0 * vel);
+
+			// Flush pending LFO instructions
+			process_lfo_state(track);
 
 			// Make note of infinite length
 			notes_playing.push_front(Note(midi, track, -1, key + key_shift[track], vel));
@@ -668,9 +744,7 @@ int main(int argc, char *argv[])
 	{
 		track_ptr[i] = get_GBA_pointer();
 
-		lfo_depth[i] = 0;
-		lfo_delay[i] = 0;
-		lfo_flag[i] = false;
+		lfo_state[i] = {};
 
 		if (reverb < 0)  // add reverb controller on all tracks
 			midi.add_controller(i, 91, lv ? (int)sqrt((reverb & 0x7f) * 127.0) : reverb & 0x7f);
