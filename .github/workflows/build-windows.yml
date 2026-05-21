@@ -1,0 +1,58 @@
+name: Build (Windows)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 / MinGW64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Stage artifacts
+        run: cmake --install build --prefix dist
+
+      - name: Bundle MinGW runtime DLLs
+        run: |
+          cd dist/bin
+          for exe in *.exe; do
+            ldd "$exe" \
+              | grep -i "mingw64/bin" \
+              | awk '{print $3}' \
+              | sort -u \
+              | xargs -I {} cp -n {} . || true
+          done
+          ls -la
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gba-mus-ripper-windows-x64
+          path: dist/bin/
+          if-no-files-found: error
