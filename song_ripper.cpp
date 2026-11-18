@@ -37,11 +37,13 @@ struct LfoState
 	uint8_t depth = 0xFF;
 
 	enum EType : uint8_t { Pitch = 0, Vol, Pan, None };
-	uint8_t type = EType::None;
+	uint8_t type = EType::Pitch;
 	uint8_t previousType = EType::None;
+	bool typeSent = false;
 
 	int delay_ctr = 0;
 	bool flag = false;
+	int notes_on = 0;
 
 	uint8_t pendingChanges = 0;
 
@@ -70,15 +72,17 @@ struct LfoState
 			depth = val;
 			pendingChanges |= (1 << EParam::Depth);
 		}
-		flag = true;
 	}
 
 	void setType(uint8_t val)
 	{
-		if (val >= Pitch && val < None && val != type)
+		if (val >= Pitch && val < None && (val != type || !typeSent))
 		{
-			previousType = type;
-			type = val;
+			if (val != type)
+			{
+				previousType = type;
+				type = val;
+			}
 			pendingChanges |= (1 << EParam::Type);
 		}
 	}
@@ -170,6 +174,7 @@ static void process_lfo_state(int track)
 			}
 
 			midi.add_NRPN(track, 139, (char)state.type);
+			state.typeSent = true;
 		}
 		
 		if (state.pendingChanges & (1 << LfoState::Speed))
@@ -185,8 +190,12 @@ static void process_lfo_state(int track)
 		
 		if (state.pendingChanges & (1 << LfoState::Depth))
 		{
-			int8_t midi_depth = lfo_depth_to_midi(state.depth);
-			add_lfo_event(track, state.type, midi_depth);
+			if (state.delay == 0 || (state.flag && state.notes_on > 0))
+			{
+				int8_t midi_depth = lfo_depth_to_midi(state.depth);
+				add_lfo_event(track, state.type, midi_depth);
+				state.flag = true;
+			}
 		}
 
 		state.pendingChanges = 0;
@@ -209,8 +218,21 @@ static void process_lfo_delay(int track)
 	}
 }
 
+static void reset_lfo_on_note(int track)
+{
+	LfoState& state = lfo_state[track];
+	if (sv && state.flag && state.delay != 0)
+	{
+		bool type_pending = state.pendingChanges & (1 << LfoState::Type);
+		add_lfo_event(track, type_pending ? state.previousType : state.type, 0);
+		state.flag = false;
+	}
+}
+
 static void start_lfo(int track)
 {
+	lfo_state[track].notes_on++;
+
 	// Reset down delay counter to its initial value
 	if (sv && lfo_state[track].delay != 0)
 		lfo_state[track].delay_ctr = lfo_state[track].delay;
@@ -220,6 +242,8 @@ static void stop_lfo(int track)
 {
 	// Cancel a LFO if it was playing,
 	LfoState& state = lfo_state[track];
+	if (state.notes_on > 0)
+		state.notes_on--;
 	if (sv && state.flag && state.delay != 0)
 	{
 		add_lfo_event(track, state.type, 0);
@@ -474,6 +498,7 @@ static void process_event(int track)
 		if (lv) vel = sqrt(127.0 * vel);
 
 		// Flush pending LFO instructions
+		reset_lfo_on_note(track);
 		process_lfo_state(track);
 
 		notes_playing.push_front( Note(midi, track, lenTbl[command - 0xd0 + 1] + len_ofs, key + key_shift[track], vel) );
@@ -625,6 +650,7 @@ static void process_event(int track)
 			if (lv) vel = (int)sqrt(127.0 * vel);
 
 			// Flush pending LFO instructions
+			reset_lfo_on_note(track);
 			process_lfo_state(track);
 
 			// Make note of infinite length
